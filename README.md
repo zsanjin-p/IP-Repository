@@ -48,7 +48,7 @@ chmod 755 /www/wwwroot/myip.xxxx.com/api/uploads  # 如果使用FTP
 
 添加到 crontab宝塔定时任务：
 
-根据自身情况定时访问url即可自动整理一次当前ip数据库
+根据自身情况定时访问url即可自动整理一次当前ip数据库，需使用User-Agent访问
 url：https://myip.xxxx.com/api/processor.php?mode=process
 
 
