@@ -3,6 +3,9 @@
 自动收集多设备公网 IP 并整合到统一白名单的完整解决方案。
 适用多设备，城域网，软路由等ip变动场景访问敏感服务。
 
+![image](https://github.com/zsanjin-p/IP-Repository/blob/main/doc/2026-01-25%20225318.png)
+
+
 ## 📋 系统概述
 
 这是一个**客户端-服务端**架构的 IP 收集系统：
