@@ -70,14 +70,15 @@ chmod +x collect_ip.sh
 
 
 
-#### Windows 用户（使用 Git Bash或者wsl）
+#### Windows 用户
 
-1. **下载安装** [Git for Windows](https://git-scm.com/download/win)
-2. **右键选择** "Git Bash Here"
+1. **下载**  collect-ip.ps1
+2. **注意**  文件修改后要另存为UTF-8 with BOM，否则报错
 3. **运行脚本**：
    ```bash
-   bash collect_ip.sh
+   .\collect_ip.sh
    ```
+4. **定时运行**  用Windows计划任务
 
 
 ## ⚙️ 客户端配置
