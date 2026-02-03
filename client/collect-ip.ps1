@@ -20,6 +20,7 @@ $IP_EXPORT_JSON = Join-Path $WORK_DIR "ip_data.json"
 $LOG_FILE = Join-Path $WORK_DIR "collector.log"
 $DEVICE_ID_FILE = Join-Path $WORK_DIR "device_id.txt"
 
+
 # IP收集配置
 $MAX_HISTORY_SIZE = 100
 
@@ -211,7 +212,7 @@ function Get-IPFromService {
     }
 }
 
-# 获取当前公网IP（带重试）
+# 获取当前公网IP（带重试，尝试所有服务）
 function Get-CurrentIPs {
     $retry_count = 0
     
@@ -226,20 +227,20 @@ function Get-CurrentIPs {
         
         $detected_ips = @()
         
+        # ⭐ 修改：遍历所有服务，不再在检测到3个IP后停止
         foreach ($service in $IP_SERVICES) {
             $ip = Get-IPFromService -Service $service -Timeout 5
             if ($ip) {
                 $detected_ips += $ip
             }
-            
-            if ($detected_ips.Count -ge 3) {
-                break
-            }
+            # 移除了原来的提前退出条件：
+            # if ($detected_ips.Count -ge 3) { break }
         }
         
         if ($detected_ips.Count -gt 0) {
             $unique_ips = $detected_ips | Select-Object -Unique
             Write-Log "✓ 检测到 $($unique_ips.Count) 个IP: $($unique_ips -join ', ')"
+            Write-Log "总共尝试了 $($IP_SERVICES.Count) 个服务，成功 $($detected_ips.Count) 个"
             return $unique_ips
         }
         
