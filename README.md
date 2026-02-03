@@ -3,6 +3,8 @@
 自动收集多设备公网 IP 并整合到统一白名单的完整解决方案。
 适用多设备，城域网，软路由等ip变动场景访问敏感服务。
 
+# 配置好服务端和客户端，在客户端上定时执行，就可更新云端白名单库！
+
 ![image](https://github.com/zsanjin-p/IP-Repository/blob/main/doc/2026-01-25%20225318.png)
 
 
@@ -28,7 +30,7 @@
 /www/wwwroot/myip.xxxx.com/
 ├── index.php              # 主API文件（前端+接口）
 └── api/
-    └── processor.php      # FTP文件处理脚本（可选）
+    └── processor.php      # 文件处理脚本
 ```
 
 #### 配置 API 密钥
@@ -44,18 +46,10 @@ define('API_KEY', 'your_secret_api_key_here');  // 改成你的密钥
 ```bash
 chmod 755 /www/wwwroot/myip.xxxx.com/api
 chmod 755 /www/wwwroot/myip.xxxx.com/api/ip_data
-chmod 755 /www/wwwroot/myip.xxxx.com/api/uploads  # 如果使用FTP
+chmod 755 /www/wwwroot/myip.xxxx.com/api/uploads  
 ```
 
-#### 设置定时任务（如果使用 FTP 方式）
 
-添加到 crontab宝塔定时任务：
-
-根据自身情况定时访问url即可自动整理一次当前ip数据库，需使用User-Agent访问
-url：https://myip.xxxx.com/api/processor.php?mode=process
-
-
----
 
 ### 2️⃣ 客户端部署
 
@@ -84,6 +78,8 @@ chmod +x collect_ip.sh
 ## ⚙️ 客户端配置
 
 编辑 `collect_ip.sh`，根据你的上传方式选择配置：
+
+### 建议配置ftp和http api上传，并优先选择ftp，因为ftp上传失败可自动切换为http api，反之不行
 
 ### 方式一：FTP 上传（推荐）
 
