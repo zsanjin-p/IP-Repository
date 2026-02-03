@@ -20,6 +20,14 @@ $IP_EXPORT_JSON = Join-Path $WORK_DIR "ip_data.json"
 $LOG_FILE = Join-Path $WORK_DIR "collector.log"
 $DEVICE_ID_FILE = Join-Path $WORK_DIR "device_id.txt"
 
+# 文件路径配置
+$WORK_DIR = "D:\Program Files\ip"
+$IP_HISTORY_FILE = Join-Path $WORK_DIR "ip_history.txt"
+$IP_EXPORT_SIMPLE = Join-Path $WORK_DIR "ip_list.txt"
+$IP_EXPORT_JSON = Join-Path $WORK_DIR "ip_data.json"
+$LOG_FILE = Join-Path $WORK_DIR "collector.log"
+$DEVICE_ID_FILE = Join-Path $WORK_DIR "device_id.txt"
+
 # IP收集配置
 $MAX_HISTORY_SIZE = 100
 
