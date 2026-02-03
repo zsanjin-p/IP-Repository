@@ -1,17 +1,15 @@
-﻿# =====================================
-# IP收集上传脚本 (PowerShell版)
+# =====================================
+# IP收集上传脚本 (PowerShell版 )
 # =====================================
 
 # 配置信息
-$UPLOAD_URL = "https://myip.xxx.com/api/upload-ip"
-$API_KEY = "your_secret_api_key_here"
+$UPLOAD_URL = "https://xxxx.com/api/upload-ip"
+$API_KEY = "your_secret_api_key_here135"
 
-$UPLOAD_METHOD = "ftp"
-
-$FTP_HOST = "xxx.com"
+$UPLOAD_METHOD = "http"#or ftp
 $FTP_PORT = 21
 $FTP_USER = "user"
-$FTP_PASS = "xxxxxxxxx"
+$FTP_PASS = "xxxxxxx"
 $FTP_UPLOAD_DIR = "/api/uploads"
 
 # 文件路径配置
@@ -26,7 +24,7 @@ $DEVICE_ID_FILE = Join-Path $WORK_DIR "device_id.txt"
 $MAX_HISTORY_SIZE = 100
 
 # 超时配置
-$FTP_TIMEOUT = 30000  # 30秒，单位毫秒
+$FTP_TIMEOUT = 30000  # 30秒,单位毫秒
 $HTTP_TIMEOUT = 30    # 30秒
 
 # 国内IP查询服务列表
@@ -348,7 +346,7 @@ function Export-JsonData {
     }
 }
 
-# 通过FTP上传文件（改进版）
+# 通过FTP上传文件（使用主动模式）
 function Upload-ViaFTP {
     if ([string]::IsNullOrWhiteSpace($FTP_HOST) -or 
         [string]::IsNullOrWhiteSpace($FTP_USER) -or 
@@ -381,10 +379,13 @@ function Upload-ViaFTP {
         $ftp_request.Method = [System.Net.WebRequestMethods+Ftp]::UploadFile
         $ftp_request.Credentials = New-Object System.Net.NetworkCredential($FTP_USER, $FTP_PASS)
         $ftp_request.UseBinary = $true
-        $ftp_request.UsePassive = $true
+        $ftp_request.UsePassive = $false
         $ftp_request.KeepAlive = $false
         $ftp_request.Timeout = $FTP_TIMEOUT
         $ftp_request.ReadWriteTimeout = $FTP_TIMEOUT
+        $ftp_request.Proxy = $null
+        
+        Write-Log "使用主动模式（Active Mode）连接"
         
         # 上传文件
         $request_stream = $ftp_request.GetRequestStream()
@@ -408,10 +409,11 @@ function Upload-ViaFTP {
                 $txt_request.Method = [System.Net.WebRequestMethods+Ftp]::UploadFile
                 $txt_request.Credentials = New-Object System.Net.NetworkCredential($FTP_USER, $FTP_PASS)
                 $txt_request.UseBinary = $true
-                $txt_request.UsePassive = $true
+                $txt_request.UsePassive = $false
                 $txt_request.KeepAlive = $false
                 $txt_request.Timeout = $FTP_TIMEOUT
                 $txt_request.ReadWriteTimeout = $FTP_TIMEOUT
+                $txt_request.Proxy = $null
                 
                 $txt_stream = $txt_request.GetRequestStream()
                 $txt_stream.Write($txt_content, 0, $txt_content.Length)
@@ -426,6 +428,25 @@ function Upload-ViaFTP {
             catch {
                 Write-Log "⚠️  TXT文件上传失败: $($_.Exception.Message)"
             }
+        }
+        
+        # ⭐ FTP上传成功后，自动调用处理接口
+        try {
+            Write-Log "触发服务器处理上传文件..."
+            $process_url = "https://myip.zsanjin.de/api/process"
+            
+            $process_request = [System.Net.HttpWebRequest]::Create($process_url)
+            $process_request.Method = "GET"
+            $process_request.Timeout = 10000
+            $process_request.Headers.Add("X-API-Key", $API_KEY)
+            
+            $process_response = $process_request.GetResponse()
+            $process_response.Close()
+            
+            Write-Log "✓ 服务器处理完成"
+        }
+        catch {
+            Write-Log "⚠️  自动处理调用失败: $($_.Exception.Message)"
         }
         
         return $true
@@ -445,12 +466,15 @@ function Upload-ViaFTP {
         elseif ($error_msg -like "*timeout*" -or $error_msg -like "*超时*") {
             Write-Log "原因: FTP连接超时"
         }
+        elseif ($error_msg -like "*227*" -or $error_msg -like "*Passive*") {
+            Write-Log "原因: 被动模式连接失败（已尝试主动模式）"
+        }
         
         return $false
     }
 }
 
-# 通过HTTP API上传数据
+# 通过HTTP API上传数据（修复版 - 使用 WebRequest）
 function Upload-ViaHTTP {
     if ([string]::IsNullOrWhiteSpace($UPLOAD_URL)) {
         Write-Log "⚠️  未配置HTTP上传URL"
@@ -468,30 +492,73 @@ function Upload-ViaHTTP {
     try {
         $json_content = [System.IO.File]::ReadAllText($IP_EXPORT_JSON, $Utf8NoBomEncoding)
         
-        $headers = @{
-            "Content-Type" = "application/json"
-            "X-API-Key" = $API_KEY
-            "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        # ⭐ 使用 HttpWebRequest 替代 Invoke-WebRequest，更好地控制 Headers
+        $request = [System.Net.HttpWebRequest]::Create($UPLOAD_URL)
+        $request.Method = "POST"
+        $request.ContentType = "application/json; charset=utf-8"
+        $request.UserAgent = "PowerShell-IPCollector/1.0"
+        $request.Timeout = $HTTP_TIMEOUT * 1000
         
-        $response = Invoke-WebRequest -Uri $UPLOAD_URL `
-                                       -Method Post `
-                                       -Headers $headers `
-                                       -Body $json_content `
-                                       -TimeoutSec $HTTP_TIMEOUT `
-                                       -UseBasicParsing `
-                                       -ErrorAction Stop
+        # ⭐ 添加 API Key 到 Headers（确保大小写正确）
+        $request.Headers.Add("X-API-Key", $API_KEY)
         
-        Write-Log "✓✓✓ HTTP上传成功 (HTTP $($response.StatusCode))"
-        Write-Log "服务器响应: $($response.Content)"
+        Write-Log "已添加 API Key 到请求头"
+        
+        # 写入请求体
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json_content)
+        $request.ContentLength = $bytes.Length
+        
+        $requestStream = $request.GetRequestStream()
+        $requestStream.Write($bytes, 0, $bytes.Length)
+        $requestStream.Close()
+        
+        # 获取响应
+        $response = $request.GetResponse()
+        $responseStream = $response.GetResponseStream()
+        $reader = New-Object System.IO.StreamReader($responseStream)
+        $responseText = $reader.ReadToEnd()
+        
+        Write-Log "✓✓✓ HTTP上传成功 (HTTP $([int]$response.StatusCode))"
+        Write-Log "服务器响应: $responseText"
+        
+        $reader.Close()
+        $responseStream.Close()
+        $response.Close()
         
         return $true
     }
-    catch {
-        $status_code = if ($_.Exception.Response) { $_.Exception.Response.StatusCode.value__ } else { "N/A" }
-        Write-Log "✗✗✗ HTTP上传失败 (HTTP $status_code)"
+    catch [System.Net.WebException] {
+        $statusCode = "N/A"
+        $errorResponse = ""
+        
+        if ($_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+            $responseStream = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($responseStream)
+            $errorResponse = $reader.ReadToEnd()
+            $reader.Close()
+        }
+        
+        Write-Log "✗✗✗ HTTP上传失败 (HTTP $statusCode)"
         Write-Log "错误详情: $($_.Exception.Message)"
         
+        if ($errorResponse) {
+            Write-Log "服务器返回: $errorResponse"
+        }
+        
+        # 401 错误特别提示
+        if ($statusCode -eq 401) {
+            Write-Log "⚠️  API密钥验证失败，请检查："
+            Write-Log "   1. 客户端 API_KEY = '$API_KEY'"
+            Write-Log "   2. 服务端 index.php 中的 API_KEY 是否一致"
+            Write-Log "   3. 检查服务器日志: /www/wwwroot/myip.zsanjin.de/api/ip_data/api_debug.log"
+        }
+        
+        return $false
+    }
+    catch {
+        Write-Log "✗✗✗ HTTP上传失败"
+        Write-Log "错误详情: $($_.Exception.Message)"
         return $false
     }
 }
