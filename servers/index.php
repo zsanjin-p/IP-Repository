@@ -1,25 +1,60 @@
 <?php
+/**
+ * IP收集整合API 
+ * 功能：接收IP数据（HTTP/FTP）、去重整合、频率限制、Web界面显示
+ * 
+ * 上传流程：
+ * 1. HTTP/FTP 上传 → /api/uploads/ (临时目录)
+ * 2. processor.php 处理 → /api/ip_data/ (最终存储)
+ * 3. 自动合并生成统计数据
+ */
 
+// ==================== 路径路由解析 ====================
+$requestUri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
+// 路径映射到action
+$pathRoutes = [
+    '/api/upload-ip' => 'upload',
+    '/api/upload'    => 'upload',
+    '/api/list'      => 'list',
+    '/api/stats'     => 'stats',
+    '/api/ips'       => 'ips',
+    '/api/json'      => 'json',
+    '/api/merge'     => 'merge',
+    '/api/process'   => 'process',  // 处理上传文件
+];
 
+// 检查路径并设置action
+foreach ($pathRoutes as $path => $action) {
+    if (strpos($requestUri, $path) === 0) {
+        $_GET['action'] = $action;
+        break;
+    }
+}
 
 // ==================== 配置 ====================
-define('API_KEY', 'your_secret_api_key_here1');  // 与客户端脚本中的API_KEY一致
-define('DATA_DIR', __DIR__ . '/api/ip_data');       // 数据存储目录
+define('API_KEY', 'your_secret_api_key_here135');
+define('UPLOAD_DIR', __DIR__ . '/api/uploads');        // 上传临时目录 (FTP/HTTP共用)
+define('DATA_DIR', __DIR__ . '/api/ip_data');          // 最终数据目录
 define('MERGED_FILE', DATA_DIR . '/merged_ips.json');
 define('SIMPLE_LIST', DATA_DIR . '/ip_list.txt');
 define('RATE_LIMIT_FILE', DATA_DIR . '/rate_limits.json');
+define('DEBUG_LOG', DATA_DIR . '/api_debug.log');
 
 // 限制配置
-define('MAX_UPLOAD_SIZE', 1048576);             // 最大上传大小 1MB
-define('RATE_LIMIT_WINDOW', 300);               // 频率限制窗口 5分钟
-define('MAX_UPLOADS_PER_WINDOW', 10);           // 每个窗口最多上传次数
-define('RATE_LIMIT_BY_IP', true);               // 按IP限制（true）或按设备ID限制（false）
+define('MAX_UPLOAD_SIZE', 1048576);
+define('RATE_LIMIT_WINDOW', 300);
+define('MAX_UPLOADS_PER_WINDOW', 10);
+define('RATE_LIMIT_BY_IP', true);
 
-if (!is_dir(DATA_DIR)) {
-    mkdir(DATA_DIR, 0755, true);
+// 创建必要的目录
+foreach ([UPLOAD_DIR, DATA_DIR] as $dir) {
+    if (!is_dir($dir)) {
+        mkdir($dir, 0755, true);
+    }
 }
 
+// CORS设置
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, GET');
 header('Access-Control-Allow-Headers: Content-Type, X-API-Key');
@@ -29,6 +64,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
+/**
+ * 写入调试日志
+ */
+function writeDebugLog($message) {
+    $timestamp = date('Y-m-d H:i:s');
+    $logMessage = "[$timestamp] $message\n";
+    file_put_contents(DEBUG_LOG, $logMessage, FILE_APPEND);
+}
+
+/**
+ * 获取客户端IP
+ */
 function getClientIP() {
     $ip = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? 
           $_SERVER['HTTP_X_REAL_IP'] ?? 
@@ -42,6 +89,9 @@ function getClientIP() {
     return $ip;
 }
 
+/**
+ * 检查频率限制
+ */
 function checkRateLimit($identifier) {
     $rateLimits = [];
     
@@ -74,18 +124,63 @@ function checkRateLimit($identifier) {
     return true;
 }
 
+/**
+ * 验证API密钥
+ */
 function validateApiKey() {
     $headers = getallheaders();
-    $apiKey = $headers['X-API-Key'] ?? $_GET['api_key'] ?? '';
+    
+    $apiKey = '';
+    $headerFound = '';
+    
+    foreach ($headers as $name => $value) {
+        if (strtolower($name) === 'x-api-key') {
+            $apiKey = $value;
+            $headerFound = $name;
+            break;
+        }
+    }
+    
+    if (empty($apiKey)) {
+        $apiKey = $_GET['api_key'] ?? '';
+        if (!empty($apiKey)) {
+            $headerFound = 'GET parameter';
+        }
+    }
+    
+    $debugInfo = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'client_ip' => getClientIP(),
+        'method' => $_SERVER['REQUEST_METHOD'],
+        'uri' => $_SERVER['REQUEST_URI'],
+        'received_key' => $apiKey,
+        'header_found' => $headerFound,
+        'match' => ($apiKey === API_KEY) ? 'YES' : 'NO'
+    ];
+    
+    writeDebugLog("API Key验证: " . json_encode($debugInfo, JSON_UNESCAPED_UNICODE));
     
     if ($apiKey !== API_KEY) {
         http_response_code(401);
         header('Content-Type: application/json');
-        echo json_encode(['error' => 'Invalid API key', 'code' => 401]);
+        echo json_encode([
+            'error' => 'Invalid API key',
+            'code' => 401,
+            'debug' => [
+                'received' => substr($apiKey, 0, 10) . '...',
+                'length' => strlen($apiKey),
+                'header_found' => $headerFound
+            ]
+        ]);
         exit;
     }
+    
+    writeDebugLog("✓ API Key验证成功");
 }
 
+/**
+ * 检查上传大小
+ */
 function checkUploadSize() {
     $contentLength = $_SERVER['CONTENT_LENGTH'] ?? 0;
     
@@ -102,7 +197,12 @@ function checkUploadSize() {
     }
 }
 
+/**
+ * 接收上传的IP数据 (保存到uploads目录)
+ */
 function handleUpload() {
+    writeDebugLog("========== 新的HTTP上传请求 ==========");
+    
     validateApiKey();
     checkUploadSize();
     
@@ -116,25 +216,32 @@ function handleUpload() {
             'limit' => MAX_UPLOADS_PER_WINDOW . ' uploads per ' . (RATE_LIMIT_WINDOW / 60) . ' minutes',
             'code' => 429
         ]);
+        writeDebugLog("✗ 频率限制: $identifier");
         return;
     }
     
     $json = file_get_contents('php://input');
+    writeDebugLog("收到数据长度: " . strlen($json) . " bytes");
+    
     $data = json_decode($json, true);
     
     if (!$data || !isset($data['device_id']) || !isset($data['ips'])) {
         http_response_code(400);
         header('Content-Type: application/json');
         echo json_encode(['error' => 'Invalid data format', 'code' => 400]);
+        writeDebugLog("✗ 数据格式错误");
         return;
     }
     
+    // ⭐ 保存到 uploads 目录（和FTP上传统一）
     $deviceId = preg_replace('/[^a-zA-Z0-9_-]/', '', $data['device_id']);
-    $deviceFile = DATA_DIR . '/' . $deviceId . '.json';
+    $uploadFile = UPLOAD_DIR . '/' . $deviceId . '.json';
     
-    file_put_contents($deviceFile, json_encode($data, JSON_PRETTY_PRINT));
+    file_put_contents($uploadFile, json_encode($data, JSON_PRETTY_PRINT));
+    writeDebugLog("✓ 保存到上传目录: $uploadFile (IP数量: " . count($data['ips']) . ")");
     
-    mergeAllIPs();
+    // ⭐ 立即处理这个文件
+    $processed = processUploadedFiles();
     
     http_response_code(200);
     header('Content-Type: application/json');
@@ -142,18 +249,78 @@ function handleUpload() {
         'success' => true,
         'device_id' => $deviceId,
         'ip_count' => count($data['ips']),
-        'message' => 'Data received and merged successfully'
+        'processed' => $processed,
+        'message' => 'Data uploaded and processed successfully'
     ]);
+    
+    writeDebugLog("✓✓✓ HTTP上传成功完成");
 }
 
+/**
+ * 处理上传目录中的文件
+ */
+function processUploadedFiles() {
+    writeDebugLog("开始处理上传文件...");
+    
+    $uploadedFiles = glob(UPLOAD_DIR . '/*.json');
+    $processedCount = 0;
+    $errorCount = 0;
+    
+    foreach ($uploadedFiles as $file) {
+        $filename = basename($file);
+        writeDebugLog("  处理文件: {$filename}");
+        
+        try {
+            $content = file_get_contents($file);
+            $data = json_decode($content, true);
+            
+            if (!$data || !isset($data['device_id']) || !isset($data['ips'])) {
+                writeDebugLog("  ✗ 文件格式无效: {$filename}");
+                $errorCount++;
+                continue;
+            }
+            
+            // 保存到数据目录
+            $deviceId = preg_replace('/[^a-zA-Z0-9_-]/', '', $data['device_id']);
+            $targetFile = DATA_DIR . '/' . $deviceId . '.json';
+            
+            file_put_contents($targetFile, json_encode($data, JSON_PRETTY_PRINT));
+            writeDebugLog("  ✓ 已保存到数据目录: {$targetFile}");
+            
+            // 删除上传目录中的文件
+            unlink($file);
+            
+            $processedCount++;
+            
+        } catch (Exception $e) {
+            writeDebugLog("  ✗ 处理失败: " . $e->getMessage());
+            $errorCount++;
+        }
+    }
+    
+    writeDebugLog("处理完成: 成功 {$processedCount} 个, 失败 {$errorCount} 个");
+    
+    // 如果有文件被处理，触发合并
+    if ($processedCount > 0) {
+        mergeAllIPs();
+    }
+    
+    return $processedCount;
+}
+
+/**
+ * 合并所有设备的IP数据
+ */
 function mergeAllIPs() {
+    writeDebugLog("开始合并IP数据...");
+    
     $allIPs = [];
     $deviceData = [];
     
     $files = glob(DATA_DIR . '/*.json');
     foreach ($files as $file) {
         $basename = basename($file);
-        if ($basename === 'merged_ips.json' || $basename === 'rate_limits.json') {
+        if (in_array($basename, ['merged_ips.json', 'rate_limits.json'])) {
             continue;
         }
         
@@ -204,9 +371,14 @@ function mergeAllIPs() {
     sort($simpleList);
     file_put_contents(SIMPLE_LIST, implode("\n", $simpleList));
     
+    writeDebugLog("合并完成: {$merged['total_ips']} 个IP, {$merged['total_devices']} 个设备");
+    
     return $merged;
 }
 
+/**
+ * 获取合并后的IP列表
+ */
 function getIPList() {
     $format = $_GET['format'] ?? 'json';
     
@@ -233,6 +405,9 @@ function getIPList() {
     }
 }
 
+/**
+ * 获取统计信息
+ */
 function getStats() {
     header('Content-Type: application/json');
     
@@ -255,6 +430,9 @@ function getStats() {
     ]);
 }
 
+/**
+ * 显示Web界面
+ */
 function showWebUI() {
     $data = [];
     if (file_exists(MERGED_FILE)) {
@@ -266,6 +444,9 @@ function showWebUI() {
     $lastUpdate = $data['updated_at'] ?? 'Never';
     $devices = $data['devices'] ?? [];
     $ips = $data['ips'] ?? [];
+    
+    // 统计待处理文件
+    $pendingUploads = count(glob(UPLOAD_DIR . '/*.json'));
     
     ?>
     <!DOCTYPE html>
@@ -304,7 +485,7 @@ function showWebUI() {
             }
             .stats {
                 display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
                 gap: 20px;
                 margin-bottom: 20px;
             }
@@ -329,6 +510,9 @@ function showWebUI() {
                 color: #667eea;
                 font-size: 36px;
                 font-weight: bold;
+            }
+            .stat-card.warning .value {
+                color: #f39c12;
             }
             .content {
                 display: grid;
@@ -394,7 +578,7 @@ function showWebUI() {
                 font-size: 13px;
                 color: #666;
             }
-            .copy-btn {
+            .copy-btn, .process-btn {
                 background: #667eea;
                 color: white;
                 border: none;
@@ -403,8 +587,9 @@ function showWebUI() {
                 cursor: pointer;
                 font-size: 12px;
                 transition: background 0.2s;
+                margin-right: 10px;
             }
-            .copy-btn:hover {
+            .copy-btn:hover, .process-btn:hover {
                 background: #5568d3;
             }
             .badge {
@@ -464,17 +649,29 @@ function showWebUI() {
                     <h3>设备数量</h3>
                     <div class="value"><?= $totalDevices ?></div>
                 </div>
+                <div class="stat-card <?= $pendingUploads > 0 ? 'warning' : '' ?>">
+                    <h3>待处理文件</h3>
+                    <div class="value"><?= $pendingUploads ?></div>
+                </div>
                 <div class="stat-card">
                     <h3>最后更新</h3>
-                    <div class="value" style="font-size: 18px;"><?= htmlspecialchars($lastUpdate) ?></div>
+                    <div class="value" style="font-size: 16px;"><?= htmlspecialchars($lastUpdate) ?></div>
                 </div>
             </div>
+            
+            <?php if ($pendingUploads > 0): ?>
+            <div class="card" style="margin-bottom: 20px; background: #fff3cd; border: 2px solid #ffc107;">
+                <h2>⚠️ 待处理上传文件</h2>
+                <p style="margin-bottom: 15px;">有 <?= $pendingUploads ?> 个文件等待处理</p>
+                <button class="process-btn" onclick="processFiles()">立即处理</button>
+            </div>
+            <?php endif; ?>
             
             <div class="content">
                 <div class="card">
                     <h2>📋 IP列表 (<?= count($ips) ?>)</h2>
                     <button class="copy-btn" onclick="copyAllIPs()">复制所有IP</button>
-                    <div class="ip-list" id="ip-list">
+                    <div class="ip-list">
                         <?php foreach ($ips as $ipInfo): ?>
                             <div class="ip-item">
                                 <span class="ip-address"><?= htmlspecialchars($ipInfo['ip']) ?></span>
@@ -504,23 +701,20 @@ function showWebUI() {
             <div class="card" style="margin-top: 20px;">
                 <h2>🔗 API访问</h2>
                 <div class="api-info">
-                    <strong>Web界面 (浏览器访问):</strong><br>
-                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF']) ?></code><br><br>
+                    <strong>📡 上传IP数据 (POST):</strong><br>
+                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST']) ?>/api/upload-ip</code><br><br>
                     
-                    <strong>纯IP列表 (一行一个):</strong><br>
-                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF']) ?>?action=ips</code><br><br>
+                    <strong>🔄 处理待处理文件:</strong><br>
+                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST']) ?>/api/process</code><br><br>
                     
-                    <strong>纯JSON数据:</strong><br>
-                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF']) ?>?action=json</code><br><br>
+                    <strong>📄 纯IP列表:</strong><br>
+                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST']) ?>/api/ips</code><br><br>
                     
-                    <strong>获取JSON格式 (兼容旧版):</strong><br>
-                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF']) ?>?action=list</code><br><br>
+                    <strong>📊 JSON数据:</strong><br>
+                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST']) ?>/api/json</code><br><br>
                     
-                    <strong>获取TXT格式 (兼容旧版):</strong><br>
-                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF']) ?>?action=list&format=txt</code><br><br>
-                    
-                    <strong>获取统计信息:</strong><br>
-                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF']) ?>?action=stats</code>
+                    <strong>📈 统计信息:</strong><br>
+                    <code><?= htmlspecialchars($_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST']) ?>/api/stats</code>
                 </div>
                 <button class="refresh-btn" onclick="location.reload()">🔄 刷新页面</button>
             </div>
@@ -543,17 +737,43 @@ function showWebUI() {
                     alert('已复制 ' + ips.length + ' 个IP到剪贴板');
                 });
             }
+            
+            function processFiles() {
+                if (!confirm('确定要处理所有待处理文件吗？')) return;
+                
+                fetch('<?= $_SERVER['PHP_SELF'] ?>?action=process')
+                    .then(response => response.json())
+                    .then(data => {
+                        alert('处理完成！\n处理文件数: ' + data.processed);
+                        location.reload();
+                    })
+                    .catch(error => {
+                        alert('处理失败: ' + error);
+                    });
+            }
         </script>
     </body>
     </html>
     <?php
 }
 
+// ==================== 路由处理 ====================
 $action = $_GET['action'] ?? ($_SERVER['REQUEST_METHOD'] === 'POST' ? 'upload' : 'web');
 
 switch ($action) {
     case 'upload':
         handleUpload();
+        break;
+    
+    case 'process':
+        // 手动或定时处理上传文件
+        $count = processUploadedFiles();
+        header('Content-Type: application/json');
+        echo json_encode([
+            'success' => true,
+            'processed' => $count,
+            'timestamp' => date('Y-m-d H:i:s')
+        ]);
         break;
     
     case 'list':
