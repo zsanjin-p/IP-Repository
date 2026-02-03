@@ -1,7 +1,5 @@
 #!/bin/bash
 
-
-
 # 配置信息
 UPLOAD_URL="https://****.com/api/upload-ip"
 API_KEY="****"
@@ -20,6 +18,7 @@ IP_EXPORT_SIMPLE="$WORK_DIR/ip_list.txt"
 IP_EXPORT_JSON="$WORK_DIR/ip_data.json"
 LOG_FILE="$WORK_DIR/collector.log"
 DEVICE_ID_FILE="$WORK_DIR/device_id.txt"
+
 
 MAX_HISTORY_SIZE=100
 
@@ -43,10 +42,17 @@ IP_SERVICES=(
 MAX_RETRIES=3
 RETRY_DELAY=5
 
+# 写入日志函数（只写入LOG_FILE）
+write_log() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $message" >> "$LOG_FILE"
+}
+
 init_workdir() {
     if [ ! -d "$WORK_DIR" ]; then
         mkdir -p "$WORK_DIR"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 创建工作目录: $WORK_DIR" >> "$LOG_FILE"
+        write_log "创建工作目录: $WORK_DIR"
     fi
     
     if [ ! -f "$IP_HISTORY_FILE" ]; then
@@ -65,7 +71,7 @@ get_device_id() {
     local device_id="${hostname}-${random_id}"
     
     echo "$device_id" > "$DEVICE_ID_FILE"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 生成设备ID: $device_id" >> "$LOG_FILE"
+    write_log "生成设备ID: $device_id"
     
     echo "$device_id"
 }
@@ -126,18 +132,18 @@ get_ip_from_service() {
     local service="$1"
     local timeout="${2:-5}"
     
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] → 尝试: $service" >> "$LOG_FILE"
+    write_log "→ 尝试: $service"
     
     local response=$(curl -s --max-time "$timeout" --connect-timeout 3 "$service" 2>&1)
     local curl_exit_code=$?
     
     if [ $curl_exit_code -ne 0 ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   ✗ 连接失败" >> "$LOG_FILE"
+        write_log "  ✗ 连接失败"
         return 1
     fi
     
     if [ -z "$response" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   ✗ 响应为空" >> "$LOG_FILE"
+        write_log "  ✗ 响应为空"
         return 1
     fi
     
@@ -158,16 +164,16 @@ get_ip_from_service() {
     esac
     
     if [ -z "$ip" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   ✗ 无法解析IP" >> "$LOG_FILE"
+        write_log "  ✗ 无法解析IP"
         return 1
     fi
     
     if validate_ip "$ip"; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   ✓ 检测到IP: $ip" >> "$LOG_FILE"
+        write_log "  ✓ 检测到IP: $ip"
         echo "$ip"
         return 0
     else
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   ✗ IP验证失败: $ip" >> "$LOG_FILE"
+        write_log "  ✗ IP验证失败: $ip"
         return 1
     fi
 }
@@ -177,10 +183,10 @@ get_current_ips() {
     
     while [ $retry_count -lt $MAX_RETRIES ]; do
         if [ $retry_count -gt 0 ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⟳ 第 $((retry_count + 1)) 次尝试..." >> "$LOG_FILE"
+            write_log "⟳ 第 $((retry_count + 1)) 次尝试..."
             sleep $RETRY_DELAY
         else
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始检测公网IP..." >> "$LOG_FILE"
+            write_log "开始检测公网IP..."
         fi
         
         local detected_ips=()
@@ -190,15 +196,11 @@ get_current_ips() {
             if [ $? -eq 0 ] && [ -n "$ip" ]; then
                 detected_ips+=("$ip")
             fi
-            
-            if [ ${#detected_ips[@]} -ge 3 ]; then
-                break
-            fi
         done
         
         if [ ${#detected_ips[@]} -gt 0 ]; then
             local unique_ips=($(printf "%s\n" "${detected_ips[@]}" | sort -u))
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ 检测到 ${#unique_ips[@]} 个IP: ${unique_ips[*]}" >> "$LOG_FILE"
+            write_log "✓ 检测到 ${#unique_ips[@]} 个IP: ${unique_ips[*]}"
             printf "%s\n" "${unique_ips[@]}"
             return 0
         fi
@@ -206,17 +208,21 @@ get_current_ips() {
         retry_count=$((retry_count + 1))
     done
     
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ 无法获取IP" >> "$LOG_FILE"
+    write_log "✗ 无法获取IP"
     return 1
 }
 
+# 修复：只记录IP到历史文件，日志写入LOG_FILE
 add_to_history() {
     local ips=("$@")
     local device_id=$(get_device_id)
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     for ip in "${ips[@]}"; do
-        echo "$(date '+%Y-%m-%d %H:%M:%S') | Device: $device_id | IP: $ip" >> "$IP_HISTORY_FILE"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 记录IP: $ip" >> "$LOG_FILE"
+        # 只写入纯净的IP记录到历史文件
+        echo "$timestamp | Device: $device_id | IP: $ip" >> "$IP_HISTORY_FILE"
+        # 日志信息写入日志文件
+        write_log "记录IP: $ip"
     done
     
     local history_count=$(wc -l < "$IP_HISTORY_FILE" 2>/dev/null || echo 0)
@@ -230,26 +236,31 @@ export_simple_list() {
     if [ -f "$IP_HISTORY_FILE" ]; then
         awk -F'IP: ' '{print $2}' "$IP_HISTORY_FILE" | grep -v '^$' | sort -u > "$IP_EXPORT_SIMPLE"
         local count=$(wc -l < "$IP_EXPORT_SIMPLE")
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ 导出IP列表: $count 个" >> "$LOG_FILE"
+        write_log "✓ 导出IP列表: $count 个"
     fi
 }
 
+# 修复：改进JSON数据导出逻辑
 export_json_data() {
     local device_id=$(get_device_id)
     
     declare -A ip_last_seen
     
     if [ -f "$IP_HISTORY_FILE" ]; then
+        # 只处理IP_HISTORY_FILE，不处理LOG_FILE
         while IFS='|' read -r timestamp device ip_part; do
-            local ip=$(echo "$ip_part" | awk '{print $2}')
+            # 提取IP地址（去除"IP: "前缀和空格）
+            local ip=$(echo "$ip_part" | sed 's/^[[:space:]]*IP:[[:space:]]*//' | xargs)
             local time=$(echo "$timestamp" | xargs)
             
-            if [ -n "$ip" ]; then
+            # 验证IP格式，只保留有效的IP地址
+            if [ -n "$ip" ] && validate_ip "$ip"; then
                 ip_last_seen["$ip"]="$time"
             fi
         done < "$IP_HISTORY_FILE"
     fi
     
+    # 生成JSON
     echo "{" > "$IP_EXPORT_JSON"
     echo "  \"device_id\": \"$device_id\"," >> "$IP_EXPORT_JSON"
     echo "  \"hostname\": \"$(hostname 2>/dev/null || echo 'unknown')\"," >> "$IP_EXPORT_JSON"
@@ -272,26 +283,26 @@ export_json_data() {
     echo "  ]" >> "$IP_EXPORT_JSON"
     echo "}" >> "$IP_EXPORT_JSON"
     
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ 导出JSON数据" >> "$LOG_FILE"
+    write_log "✓ 导出JSON数据"
 }
 
 upload_via_ftp() {
     if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ FTP配置不完整" >> "$LOG_FILE"
+        write_log "✗ FTP配置不完整"
         return 1
     fi
     
     if [ ! -f "$IP_EXPORT_JSON" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ JSON文件不存在" >> "$LOG_FILE"
+        write_log "✗ JSON文件不存在"
         return 1
     fi
     
     local device_id=$(get_device_id)
     local remote_filename="${device_id}.json"
     
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 📤 通过FTP上传数据..." >> "$LOG_FILE"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] FTP服务器: $FTP_HOST:$FTP_PORT" >> "$LOG_FILE"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 远程文件名: $remote_filename" >> "$LOG_FILE"
+    write_log "📤 通过FTP上传数据..."
+    write_log "FTP服务器: $FTP_HOST:$FTP_PORT"
+    write_log "远程文件名: $remote_filename"
     
     local ftp_url="ftp://$FTP_HOST:$FTP_PORT$FTP_UPLOAD_DIR/$remote_filename"
     
@@ -304,11 +315,11 @@ upload_via_ftp() {
     
     local curl_code=$?
     
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] curl退出码: $curl_code" >> "$LOG_FILE"
+    write_log "curl退出码: $curl_code"
     
     if [ $curl_code -eq 0 ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓✓✓ FTP上传成功" >> "$LOG_FILE"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 远程路径: $FTP_UPLOAD_DIR/$remote_filename" >> "$LOG_FILE"
+        write_log "✓✓✓ FTP上传成功"
+        write_log "远程路径: $FTP_UPLOAD_DIR/$remote_filename"
         
         if [ -f "$IP_EXPORT_SIMPLE" ]; then
             local txt_url="ftp://$FTP_HOST:$FTP_PORT$FTP_UPLOAD_DIR/${device_id}.txt"
@@ -317,22 +328,49 @@ upload_via_ftp() {
                 "$txt_url" \
                 --ftp-create-dirs \
                 --max-time 30 2>&1
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ 同时上传了TXT文件" >> "$LOG_FILE"
+            write_log "✓ 同时上传了TXT文件"
+        fi
+        
+        # ⭐ FTP上传成功后，自动调用处理接口
+        write_log "触发服务器处理上传文件..."
+        local process_url="https://myip.zsanjin.de/api/process"
+        
+        local process_temp="/tmp/process_response_$$.txt"
+        local process_http_code=$(curl -s -w "%{http_code}" \
+            -X GET "$process_url" \
+            -H "X-API-Key: $API_KEY" \
+            -o "$process_temp" \
+            --max-time 10 2>&1)
+        
+        local process_code=$?
+        local process_response=""
+        if [ -f "$process_temp" ]; then
+            process_response=$(cat "$process_temp")
+            rm -f "$process_temp"
+        fi
+        
+        write_log "处理接口HTTP状态码: $process_http_code"
+        write_log "处理接口响应: $process_response"
+        
+        if [ $process_code -eq 0 ] && [ "$process_http_code" = "200" ]; then
+            write_log "✓ 服务器处理完成"
+        else
+            write_log "⚠️  自动处理调用失败 (curl退出码: $process_code, HTTP: $process_http_code)"
         fi
         
         return 0
     else
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗✗✗ FTP上传失败" >> "$LOG_FILE"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 响应: $response" >> "$LOG_FILE"
+        write_log "✗✗✗ FTP上传失败"
+        write_log "响应: $response"
         
         case "$curl_code" in
-            6)  echo "[$(date '+%Y-%m-%d %H:%M:%S')] 原因: 无法解析FTP主机名" >> "$LOG_FILE" ;;
-            7)  echo "[$(date '+%Y-%m-%d %H:%M:%S')] 原因: 无法连接到FTP服务器" >> "$LOG_FILE" ;;
-            9)  echo "[$(date '+%Y-%m-%d %H:%M:%S')] 原因: FTP访问被拒绝" >> "$LOG_FILE" ;;
-            28) echo "[$(date '+%Y-%m-%d %H:%M:%S')] 原因: FTP连接超时" >> "$LOG_FILE" ;;
-            67) echo "[$(date '+%Y-%m-%d %H:%M:%S')] 原因: FTP登录失败（用户名或密码错误）" >> "$LOG_FILE" ;;
-            78) echo "[$(date '+%Y-%m-%d %H:%M:%S')] 原因: 远程文件未找到或无权限" >> "$LOG_FILE" ;;
-            *)  echo "[$(date '+%Y-%m-%d %H:%M:%S')] curl错误码: $curl_code" >> "$LOG_FILE" ;;
+            6)  write_log "原因: 无法解析FTP主机名" ;;
+            7)  write_log "原因: 无法连接到FTP服务器" ;;
+            9)  write_log "原因: FTP访问被拒绝" ;;
+            28) write_log "原因: FTP连接超时" ;;
+            67) write_log "原因: FTP登录失败（用户名或密码错误）" ;;
+            78) write_log "原因: 远程文件未找到或无权限" ;;
+            *)  write_log "curl错误码: $curl_code" ;;
         esac
         
         return 1
@@ -341,17 +379,17 @@ upload_via_ftp() {
 
 upload_via_http() {
     if [ -z "$UPLOAD_URL" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️  未配置HTTP上传URL" >> "$LOG_FILE"
+        write_log "⚠️  未配置HTTP上传URL"
         return 1
     fi
     
     if [ ! -f "$IP_EXPORT_JSON" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ JSON文件不存在" >> "$LOG_FILE"
+        write_log "✗ JSON文件不存在"
         return 1
     fi
     
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 📤 通过HTTP API上传数据..." >> "$LOG_FILE"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 目标URL: $UPLOAD_URL" >> "$LOG_FILE"
+    write_log "📤 通过HTTP API上传数据..."
+    write_log "目标URL: $UPLOAD_URL"
     
     local temp_response="/tmp/upload_response.txt"
     local temp_headers="/tmp/upload_headers.txt"
@@ -368,8 +406,8 @@ upload_via_http() {
     
     local curl_exit_code=$?
     
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] curl退出码: $curl_exit_code" >> "$LOG_FILE"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] HTTP状态码: $http_code" >> "$LOG_FILE"
+    write_log "curl退出码: $curl_exit_code"
+    write_log "HTTP状态码: $http_code"
     
     local response=""
     if [ -f "$temp_response" ]; then
@@ -378,14 +416,14 @@ upload_via_http() {
     
     case "$http_code" in
         200|201)
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓✓✓ HTTP上传成功 (HTTP $http_code)" >> "$LOG_FILE"
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 服务器响应: $response" >> "$LOG_FILE"
+            write_log "✓✓✓ HTTP上传成功 (HTTP $http_code)"
+            write_log "服务器响应: $response"
             rm -f "$temp_response" "$temp_headers"
             return 0
             ;;
         *)
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗✗✗ HTTP上传失败 (HTTP $http_code)" >> "$LOG_FILE"
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 错误详情: ${response:0:200}" >> "$LOG_FILE"
+            write_log "✗✗✗ HTTP上传失败 (HTTP $http_code)"
+            write_log "错误详情: ${response:0:200}"
             rm -f "$temp_response" "$temp_headers"
             return 1
             ;;
@@ -398,7 +436,7 @@ upload_to_server() {
             upload_via_ftp
             local result=$?
             if [ $result -ne 0 ]; then
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️  FTP上传失败，尝试HTTP方式..." >> "$LOG_FILE"
+                write_log "⚠️  FTP上传失败，尝试HTTP方式..."
                 upload_via_http
                 return $?
             fi
@@ -408,28 +446,28 @@ upload_to_server() {
             upload_via_http
             ;;
         *)
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ 未知的上传方式: $UPLOAD_METHOD" >> "$LOG_FILE"
+            write_log "✗ 未知的上传方式: $UPLOAD_METHOD"
             return 1
             ;;
     esac
 }
 
 main() {
-    echo "" >> "$LOG_FILE"
-    echo "========================================" >> "$LOG_FILE"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] IP收集任务开始" >> "$LOG_FILE"
-    echo "========================================" >> "$LOG_FILE"
+    write_log ""
+    write_log "========================================"
+    write_log "IP收集任务开始"
+    write_log "========================================"
     
     init_workdir
     
     local device_id=$(get_device_id)
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 设备ID: $device_id" >> "$LOG_FILE"
+    write_log "设备ID: $device_id"
     
     mapfile -t current_ips < <(get_current_ips)
     
     if [ ${#current_ips[@]} -eq 0 ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ 无法获取IP，任务终止" >> "$LOG_FILE"
-        echo "========================================" >> "$LOG_FILE"
+        write_log "✗ 无法获取IP，任务终止"
+        write_log "========================================"
         exit 1
     fi
     
@@ -438,8 +476,8 @@ main() {
     export_json_data
     upload_to_server
     
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 任务完成" >> "$LOG_FILE"
-    echo "========================================" >> "$LOG_FILE"
+    write_log "任务完成"
+    write_log "========================================"
     
     echo ""
     echo "生成的文件："
